@@ -1,0 +1,168 @@
+# main.yml
+---
+- name: Configure custom VLC media player on Raspberry Pi
+  hosts: all
+  become: true
+  vars:
+    ansible_python_interpreter: auto_silent
+    headless_raspi_config_pi_hostname: "rpi-media-player"
+    vlc_web_password: password
+
+  tasks:
+    - name: Verify if correct Raspberry Pi OS version is being used
+      block:
+        - name: First, check if the host is actually a Raspberry Pi
+          ansible.builtin.fail:
+            msg: "ERROR: The host doesn't seem to be a Raspberry Pi according to its kernel information: ('{{ ansible_kernel }}')"
+          when: not ansible_kernel is search("-rpi-")
+
+        - name: Second, check if the Raspberry Pi OS (Debian) is used on the Raspberry Pi
+          ansible.builtin.fail:
+            msg: "ERROR: The host's current OS ('{{ ansible_distribution }}') is not Debian."
+          when: ansible_distribution != "Debian"
+
+        - name: Lastly, check if the Raspberry Pi OS is using Debian Bookworm version (12) or newer
+          ansible.builtin.fail:
+            msg: "ERROR: The host's current Raspberry Pi OS version ('{{ ansible_distribution_release }}') is not supported for this playbook."
+          when: ansible_distribution_major_version | int < 12
+
+    - name: Attempt to get the external USB device's information if eligible USB storage is connected
+      block:
+        - name: Set the variables with default values
+          ansible.builtin.set_fact:
+            eligible_usb_storage_devices: []
+            usb_storage_device_path: ""
+
+        - name: First, sync with udev
+          ansible.builtin.command: udevadm settle
+          changed_when: false
+
+        - name: Retrieve the JSON string of 'lsblk' command output to be processed
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/lsblk
+              - --json
+              - --noempty
+              - --paths
+              - --sort
+              - TYPE
+              - --output
+              - TYPE,KNAME,LABEL,PARTTYPENAME,SUBSYSTEMS
+          register: lsblk_json_string_output
+          changed_when: lsblk_json_string_output.rc != 0
+
+        - name: Convert the JSON to a list that Ansible can conveniently consume
+          ansible.builtin.set_fact:
+            lsblk_list_of_dicts: "{{ item.value }}"
+          with_items: "{{ lsblk_json_string_output.stdout | from_json | dict2items }}"
+
+        - name: Filter out the list of connected USB storage devices for eligibiliity
+          ansible.builtin.set_fact:
+            eligible_usb_storage_devices: "{{ eligible_usb_storage_devices + [item] }}"
+          when: (item.type == 'part') and (item.subsystems is search('usb')) and (item.label == 'VIDEOS')
+          with_items: "{{ lsblk_list_of_dicts }}"
+
+        - name: Set the fact whether the number of connected USB storage device is exactly 1 or not
+          ansible.builtin.set_fact:
+            eligible_usb_storage_devices_count_unqualified: "{{ (eligible_usb_storage_devices | default(0) | length | int != 1) | bool }}"
+
+        - name: Print a warning message that the installation will not be able to add videos if applicable
+          ansible.builtin.debug:
+            msg: |
+              WARNING: There must be exactly one USB storage device connected with the volume label, 'VIDEOS',
+              in order to retrieve the video files for the media player. The installation will resume
+              without importing videos.
+          failed_when: eligible_usb_storage_devices_count_unqualified
+          ignore_errors: "{{ eligible_usb_storage_devices_count_unqualified }}"
+
+        - name: Set the USB storage path if one is available
+          ansible.builtin.set_fact:
+            usb_storage_device_path: "{{ eligible_usb_storage_devices[0].kname }}"
+          when: not eligible_usb_storage_devices_count_unqualified
+
+    - name: Attempt to mount the USB to the system
+      ansible.posix.mount:
+        path: /media
+        src: "{{ usb_storage_device_path }}"
+        opts: ro
+        state: mounted
+        fstype: auto
+      when: (not eligible_usb_storage_devices_count_unqualified)
+
+    - name: Create the 'Videos' directory in the Ansible user's home directory if non-existent
+      become: false
+      when: (not eligible_usb_storage_devices_count_unqualified)
+      ansible.builtin.file:
+        path: "{{ ansible_facts.env.PWD }}/Videos"
+        mode: '0755'
+        state: directory
+
+    - name: Attempt to copy the files from the USB to the media player's directory
+      become: false
+      when: (not eligible_usb_storage_devices_count_unqualified)
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/rsync
+          - --archive
+          - --no-perms
+          - --no-owner
+          - --no-group
+          - --omit-dir-times
+          - --no-times
+          - --delete
+          - --progress
+          - --ignore-existing
+          - --whole-file
+          - --human-readable
+          - --stats
+          - /media/
+          - "{{ ansible_facts.env.PWD }}/Videos"
+      register: rsync_result
+      changed_when: '"Number of regular files transferred: 0" not in rsync_result.stdout'
+
+    - name: Install the required Ansible role
+      become: false
+      ansible.builtin.command: ansible-galaxy role install bashtheshell.headless_raspi_config
+      delegate_to: localhost
+      register: result
+      changed_when: '"is already installed" not in result.stderr'
+
+    - name: Reconfigure the Raspberry Pi using installed role in preparation for media player configuration
+      ansible.builtin.include_role:
+        name: bashtheshell.headless_raspi_config
+      vars:
+        headless_raspi_config_pi_bootup_behavior: "B2"
+        headless_raspi_config_pi_disable_onboard_audio: true
+
+    - name: Run the handler from the imported role if needed
+      ansible.builtin.meta: flush_handlers
+
+    - name: Install the required packages for the video media player
+      ansible.builtin.apt:
+        state: present
+        pkg:
+          - xorg
+          - vlc
+          - openbox
+          - pulseaudio
+
+    - name: Add the .Xresources file to user's home directory
+      become: false
+      ansible.builtin.template:
+        src: templates/Xresources.j2
+        dest: "{{ ansible_facts.env.PWD }}/.Xresources"
+        mode: '0644'
+
+    - name: Add the VLC initialization script to user's .bash_profile
+      become: false
+      notify: Restart the host
+      ansible.builtin.template:
+        src: templates/bash_profile.j2
+        dest: "{{ ansible_facts.env.PWD }}/.bash_profile"
+        mode: '0644'
+      vars:
+        vlc_video_directory: "{{ ansible_facts.env.PWD }}/Videos"
+
+  handlers:
+    - name: Restart the host
+      ansible.builtin.reboot:

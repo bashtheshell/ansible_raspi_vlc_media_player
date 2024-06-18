@@ -1,0 +1,38 @@
+. ~/.bashrc
+if [[ -z "${DISPLAY}" ]] && [[ "${XDG_VTNR}" -eq 1 ]]; then
+  export DISPLAY=:0
+  exec /usr/bin/startx -- vt1 -keeptty &
+  sleep 2
+  
+  # For more information on '--global-key', please see 'Hot keys' section in the manpage.
+  # https://wiki.videolan.org/VLC_command-line_help/
+
+  cvlc -vv \
+    --x11-display=:0 \
+    --plugins-cache \
+    --input-fast-seek \
+    --video \
+    --video-title-show \
+    --video-on-top \
+    --fullscreen \
+    --keyboard-events \
+    --global-key-stop="Browser Home" \
+    --global-key-loop="Browser Back" \
+    --global-key-random="Menu" \
+    --global-key-next="Up" \
+    --global-key-prev="Down" \
+    --global-key-jump+short="Right" \
+    --global-key-jump-short="Left" \
+    --global-key-play-pause="Enter" \
+    --global-key-rate-normal="Volume Down" \
+    --global-key-rate-faster-fine="Volume Up" \
+    --loop \
+    --extraintf=http \
+    --lua \
+    --lua-intf=http \
+    --http-host 0.0.0.0 \
+    --http-port=8080 \
+    --http-password={{ vlc_web_password }} \
+    --playlist-autostart \
+    --playlist-tree {{ vlc_video_directory }}
+fi
