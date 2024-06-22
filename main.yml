@@ -85,7 +85,7 @@
         path: /media
         src: "{{ usb_storage_device_path }}"
         opts: ro
-        state: mounted
+        state: ephemeral 
         fstype: auto
       when: (not eligible_usb_storage_devices_count_unqualified)
 
